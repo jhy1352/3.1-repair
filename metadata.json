@@ -1,0 +1,6 @@
+{
+  "name": "TRPG Engine & Web Player",
+  "description": "High-Fidelity Cross-Platform TRPG Engine & Web Player with Dynamic AI GM, CSPRNG Dice, and Cloud Sync",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
