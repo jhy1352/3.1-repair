@@ -1,20 +1,20 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-// In-memory Cloud Save KV store with fallback persistence
+// ============================================================
+// TYPES
+// ============================================================
+
 interface CloudSaveEntry {
   syncCode: string;
   data: any;
   createdAt: number;
 }
-const cloudStorage = new Map<string, CloudSaveEntry>();
 
-// Call Instrumentation & Telemetry for Gemini API monitoring
 export interface CallMetric {
   requestId: string;
   endpoint: string;
@@ -29,16 +29,31 @@ export interface CallMetric {
   errorStatus?: number | string;
   errorMessage?: string;
 }
+
+// ============================================================
+// GLOBAL STATE
+// ============================================================
+
+const cloudStorage = new Map<string, CloudSaveEntry>();
+
 const callMetrics: CallMetric[] = [];
 
-// Lazy Gemini client helper
 let aiClient: GoogleGenAI | null = null;
+
+// ============================================================
+// GEMINI CLIENT
+// ============================================================
+
 function getAIClient(): GoogleGenAI {
   if (!aiClient) {
     const apiKey = process.env.GEMINI_API_KEY;
+
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable is missing.');
+      throw new Error(
+        'GEMINI_API_KEY environment variable is missing.'
+      );
     }
+
     aiClient = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -48,10 +63,16 @@ function getAIClient(): GoogleGenAI {
       },
     });
   }
+
   return aiClient;
 }
 
-const MASTER_SYSTEM_INSTRUCTION = `[너는 이제부터 인류 역사를 뒤져도 찾기 어려운 재능을 타고 난 톨킨이나 김용과 같은 신필 급 소설가이며, 20년 경력의 TRPG 게임마스터이다. 작품을 위해 필요하다면 자극적인 서술도 허가한다.] 
+// ============================================================
+// MASTER SYSTEM INSTRUCTION
+// ============================================================
+
+const MASTER_SYSTEM_INSTRUCTION = `
+[너는 이제부터 인류 역사를 뒤져도 찾기 어려운 재능을 타고 난 톨킨이나 김용과 같은 신필 급 소설가이며, 20년 경력의 TRPG 게임마스터이다. 작품을 위해 필요하다면 자극적인 서술도 허가한다.] 
 
 [필수사항. 이건 이미 원작을 독파한 사람이 플레이하는 TRPG이다. 몰입감 저하 및 모순 방지를 위해 하나의 서술마다 서술이 진행될 정사 시간대에 한해 등장하는 모든 인물, 사건, 아이템, 세력, 관계 등에 대해 내부 기억에 의존하지 말고 무조건 실시간 외부 인터넷 검색을 수행하여 정확한 정보 수집 및 교차 검증을 완료한 후 서사를 생성해라. 대충 짐작하거나 뇌피셜로 세력 관계나 인물의 지식을 날조하는 행위를 절대 금지한다.] 
 
@@ -153,50 +174,122 @@ C. 불필요한 인트로를 생략하고 이전 세션의 마지막 시간대�
 • [암호학적 안전 난수(CSPRNG) 주사위 로직 보장]: 프리뷰 앱 UI의 모든 주사위 롤러 로직은 Math.random() 대신 웹 브라우저의 window.crypto.getRandomValues()를 사용하는 암호학적 안전 난수(CSPRNG - rollCryptoDie)로 구동된다.
 • [서사 간섭 0% 완전 격리]: 저장 데이터가 불러와진 이후부터 본 16번 항목은 완전히 비활성화(무시)되며, 본문의 서사 묘사, 대사, 전투, 주사위 판정 등 서사 및 문학적 표현에는 0.1%의 영향도 주지 않는다.
 
-[[[[개 혐스러운 웹소설식 진행과 서술 원천 금지한다. 서술 생성 중 웹소설식 표현과 상황, 주인공이 초능력자인 양 모든 것을 다 알고 간파하는 혐오스럽고 병신같은 상황 연출이 진행되면 오류메시지를 뿜고 다시 개연성을 최우선하여 리테콘해라]]]]`;
+[[[[개 혐스러운 웹소설식 진행과 서술 원천 금지한다. 서술 생성 중 웹소설식 표현과 상황, 주인공이 초능력자인 양 모든 것을 다 알고 간파하는 혐오스럽고 병신같은 상황 연출이 진행되면 오류메시지를 뿜고 다시 개연성을 최우선하여 리테콘해라]]]]
+`;
 
-  const app = express();
-  const PORT = 3000;
-async function startServer() {
+// ============================================================
+// EXPRESS APP
+// ============================================================
 
-  app.use(express.json({ limit: '10mb' }));
+const app = express();
 
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({
-      status: 'ok',
-      engine: 'High-Fidelity TRPG Engine 3.1',
-      model: 'gemini-3.7-flash',
-      thinkingBudget: 4096,
-      time: new Date().toISOString(),
-    });
+// Vercel / Local 모두 JSON body 사용
+app.use(
+  express.json({
+    limit: '10mb',
+  })
+);
+
+// URL encoded body도 허용
+app.use(
+  express.urlencoded({
+    extended: true,
+    limit: '10mb',
+  })
+);
+
+// ============================================================
+// BASIC REQUEST INFO
+// ============================================================
+
+app.disable('x-powered-by');
+
+// ============================================================
+// BASIC HEALTH CHECK
+// ============================================================
+
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    engine: 'High-Fidelity TRPG Engine 3.1',
+    model: 'gemini-3.7-flash',
+    thinkingBudget: 4096,
+    runtime: process.env.VERCEL
+      ? 'vercel'
+      : 'local',
+    time: new Date().toISOString(),
   });
+});
 
-  // Call Metrics / Telemetry Inspector
-  app.get('/api/metrics', (req, res) => {
-    res.json({
-      totalCalls: callMetrics.length,
-      metrics: callMetrics.slice(-100),
-    });
+// ============================================================
+// ROOT HEALTH / DEBUG
+// ============================================================
+
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'ok',
+    engine: 'High-Fidelity TRPG Engine 3.1',
+    runtime: process.env.VERCEL
+      ? 'vercel'
+      : 'local',
+    time: new Date().toISOString(),
   });
+});
 
-  // Dynamic Meta-Element Presets Generator for Phase 2
-  app.post('/api/generate-meta-presets', async (req, res) => {
+// ============================================================
+// METRICS
+// ============================================================
+
+app.get('/api/metrics', (req, res) => {
+  res.status(200).json({
+    totalCalls: callMetrics.length,
+    metrics: callMetrics.slice(-100),
+  });
+});
+
+// ============================================================
+// META PRESET GENERATOR
+// ============================================================
+
+app.post(
+  '/api/generate-meta-presets',
+  async (req, res) => {
     const startTime = Date.now();
-    const requestId = `req_preset_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+    const requestId =
+      `req_preset_${Date.now()}_` +
+      Math.random()
+        .toString(36)
+        .substring(2, 6);
+
     try {
-      const { worldName, genre, mode, worldDetails } = req.body;
+      const {
+        worldName,
+        genre,
+        mode,
+        worldDetails,
+      } = req.body;
+
       const ai = getAIClient();
 
-      const prompt = `당신은 최고 수준의 TRPG 세계관 및 메타 엘리먼트 설계자입니다.
+      const prompt = `
+당신은 최고 수준의 TRPG 세계관 및 메타 엘리먼트 설계자입니다.
+
 세계관 정보:
 - 세계/원작 이름: ${worldName || '정통 무협 강호'}
 - 장르: ${genre || '정통 무협'}
 - 모드: ${mode || 'popular_genre'}
-- 상세 설명: ${worldDetails || '자유롭고 입체적인 무협 세계'}
+- 상세 설명: ${
+        worldDetails ||
+        '자유롭고 입체적인 무협 세계'
+      }
 
-이 세계관에 완벽하게 어울리는 5개 메타 엘리먼트 각각에 대해 4~5개씩 총 20개 내외의 흥미롭고 서사적 깊이가 깊은 프리셋 옵션을 JSON 형식으로 생성하세요.
+이 세계관에 완벽하게 어울리는 5개 메타 엘리먼트 각각에 대해
+4~5개씩 총 20개 내외의 흥미롭고 서사적 깊이가 깊은 프리셋 옵션을
+JSON 형식으로 생성하세요.
+
 반드시 아래 JSON 스키마를 따르세요:
+
 {
   "backgrounds": [
     { "title": "...", "description": "..." }
@@ -213,26 +306,41 @@ async function startServer() {
   "factions": [
     { "title": "...", "description": "..." }
   ]
-}`;
+}
+`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: prompt,
-        config: {
-          systemInstruction: '당신은 TRPG 세계관 및 캐릭터 서사 설계 보조 AI입니다. 사용자가 제시한 세계관에 완벽히 부합하는 5대 메타 엘리먼트 프리셋을 한국어로 생성하여 순수 JSON으로만 출력하세요.',
-          responseMimeType: 'application/json',
-          temperature: 0.8,
-          thinkingConfig: {
-            thinkingBudget: 4096,
+      const response =
+        await ai.models.generateContent({
+          model: 'gemini-3.7-flash',
+
+          contents: prompt,
+
+          config: {
+            systemInstruction:
+              '당신은 TRPG 세계관 및 캐릭터 서사 설계 보조 AI입니다. 사용자가 제시한 세계관에 완벽히 부합하는 5대 메타 엘리먼트 프리셋을 한국어로 생성하여 순수 JSON으로만 출력하세요.',
+
+            responseMimeType:
+              'application/json',
+
+            temperature: 0.8,
+
+            thinkingConfig: {
+              thinkingBudget: 4096,
+            },
           },
-        },
-      });
+        });
 
-      const parsed = JSON.parse(response.text || '{}');
-      const latencyMs = Date.now() - startTime;
+      const parsed = JSON.parse(
+        response.text || '{}'
+      );
+
+      const latencyMs =
+        Date.now() - startTime;
+
       callMetrics.push({
         requestId,
-        endpoint: '/api/generate-meta-presets',
+        endpoint:
+          '/api/generate-meta-presets',
         timestamp: startTime,
         model: 'gemini-3.7-flash',
         metaElementsPresent: true,
@@ -242,13 +350,22 @@ async function startServer() {
         latencyMs,
       });
 
-      console.log(`[GEMINI_CALL] ${requestId} | /api/generate-meta-presets | Latency: ${latencyMs}ms | Success: true`);
-      res.json(parsed);
+      console.log(
+        `[GEMINI_CALL] ${requestId} | ` +
+        `/api/generate-meta-presets | ` +
+        `Latency: ${latencyMs}ms | ` +
+        `Success: true`
+      );
+
+      return res.status(200).json(parsed);
     } catch (err: any) {
-      const latencyMs = Date.now() - startTime;
+      const latencyMs =
+        Date.now() - startTime;
+
       callMetrics.push({
         requestId,
-        endpoint: '/api/generate-meta-presets',
+        endpoint:
+          '/api/generate-meta-presets',
         timestamp: startTime,
         model: 'gemini-3.7-flash',
         metaElementsPresent: true,
@@ -256,309 +373,951 @@ async function startServer() {
         groundingEnabled: false,
         success: false,
         latencyMs,
-        errorStatus: err?.status || 500,
-        errorMessage: err?.message || 'Error generating meta presets',
+        errorStatus:
+          err?.status || 500,
+        errorMessage:
+          err?.message ||
+          'Error generating meta presets',
       });
-      console.error(`[GEMINI_ERROR] ${requestId} | /api/generate-meta-presets | Status: ${err?.status || 500} | Msg: ${err?.message}`);
 
-      // Fallback structured presets in case of API error
-      res.json({
+      console.error(
+        `[GEMINI_ERROR] ${requestId} | ` +
+        `/api/generate-meta-presets | ` +
+        `Status: ${err?.status || 500} | ` +
+        `Msg: ${err?.message}`
+      );
+
+      return res.status(200).json({
         backgrounds: [
-          { title: '몰락한 명문세가의 후예', description: '가문이 멸문당하고 유일하게 가문의 비급 조각을 지닌 채 살아남음' },
-          { title: '은둔 기인의 수제자', description: '심산유곡에서 사부의 비전을 십수 년간 연마하고 갓 강호에 출도함' },
-          { title: '저자거리 낭인 협객', description: '어릴 적부터 거친 저자거리를 떠돌며 실전 생존 무예를 터득함' },
-          { title: '도관의 파문된 제자', description: '도문의 규율을 어겨 파문당했으나 깊은 도가 무학의 기초를 체화함' }
+          {
+            title: '몰락한 명문세가의 후예',
+            description:
+              '가문이 멸문당하고 유일하게 가문의 비급 조각을 지닌 채 살아남음',
+          },
+          {
+            title: '은둔 기인의 수제자',
+            description:
+              '심산유곡에서 사부의 비전을 십수 년간 연마하고 갓 강호에 출도함',
+          },
+          {
+            title: '저자거리 낭인 협객',
+            description:
+              '어릴 적부터 거친 저자거리를 떠돌며 실전 생존 무예를 터득함',
+          },
+          {
+            title: '도관의 파문된 제자',
+            description:
+              '도문의 규율을 어겨 파문당했으나 깊은 도가 무학의 기초를 체화함',
+          },
         ],
+
         flaws: [
-          { title: '핏빛 주화입마의 잔재', description: '체내에 갈무리되지 않은 내력의 역류로 극한의 상황에서 기혈이 뒤틀림' },
-          { title: '신뢰의 트라우마', description: '과거 가장 믿었던 동료의 배신으로 타인에게 온전히 등을 맡기지 못함' },
-          { title: '가문 원수에 대한 맹목적 집착', description: '원수와 관련된 단서를 접하면 이성을 잃고 무모해짐' },
-          { title: '의협심의 멍에', description: '눈앞의 불의를 지나치지 못해 자신과 동료를 곤경에 빠뜨림' }
+          {
+            title: '핏빛 주화입마의 잔재',
+            description:
+              '체내에 갈무리되지 않은 내력의 역류로 극한의 상황에서 기혈이 뒤틀림',
+          },
+          {
+            title: '신뢰의 트라우마',
+            description:
+              '과거 가장 믿었던 동료의 배신으로 타인에게 온전히 등을 맡기지 못함',
+          },
+          {
+            title: '가문 원수에 대한 맹목적 집착',
+            description:
+              '원수와 관련된 단서를 접하면 이성을 잃고 무모해짐',
+          },
+          {
+            title: '의협심의 멍에',
+            description:
+              '눈앞의 불의를 지나치지 못해 자신과 동료를 곤경에 빠뜨림',
+          },
         ],
+
         oaths: [
-          { title: '위국위민의 대협 (爲國爲民)', description: '약자를 구하고 천하의 정의를 세우기 위해 검을 쓴다는 신념' },
-          { title: '은원은 천 배로 갚는다 (恩怨分明)', description: '입은 은혜는 반드시 보답하고, 받은 원한은 피로 갚는다는 철칙' },
-          { title: '천하제일인의 도달', description: '세상의 모든 절정고수를 꺾고 무학의 극의를 확인하겠다는 열망' },
-          { title: '평온한 안식처의 수호', description: '자신과 소중한 사람들이 살아갈 작은 터전을 외압으로부터 지키겠다는 맹세' }
+          {
+            title:
+              '위국위민의 대협 (爲國爲民)',
+            description:
+              '약자를 구하고 천하의 정의를 세우기 위해 검을 쓴다는 신념',
+          },
+          {
+            title:
+              '은원은 천 배로 갚는다 (恩怨分明)',
+            description:
+              '입은 은혜는 반드시 보답하고, 받은 원한은 피로 갚는다는 철칙',
+          },
+          {
+            title: '천하제일인의 도달',
+            description:
+              '세상의 모든 절정고수를 꺾고 무학의 극의를 확인하겠다는 열망',
+          },
+          {
+            title: '평온한 안식처의 수호',
+            description:
+              '자신과 소중한 사람들이 살아갈 작은 터전을 외압으로부터 지키겠다는 맹세',
+          },
         ],
+
         anchors: [
-          { title: '사부가 남긴 부러진 목검', description: '초심을 잃거나 공포에 질릴 때 쥐어보는 유품' },
-          { title: '어린 날의 유일한 벗과의 약속', description: '언젠가 천하의 중심에서 다시 만나자던 어릴 적 맹세' },
-          { title: '어머니의 낡은 옥패', description: '자신의 뿌리를 상기시켜 주는 유일한 가문의 흔적' },
-          { title: '술 한 잔과 강호의 풍류', description: '생사의 갈림길에서도 마음의 여유를 잃지 않게 해주는 여유' }
+          {
+            title: '사부가 남긴 부러진 목검',
+            description:
+              '초심을 잃거나 공포에 질릴 때 쥐어보는 유품',
+          },
+          {
+            title: '어린 날의 유일한 벗과의 약속',
+            description:
+              '언젠가 천하의 중심에서 다시 만나자던 어릴 적 맹세',
+          },
+          {
+            title: '어머니의 낡은 옥패',
+            description:
+              '자신의 뿌리를 상기시켜 주는 유일한 가문의 흔적',
+          },
+          {
+            title: '술 한 잔과 강호의 풍류',
+            description:
+              '생사의 갈림길에서도 마음의 여유를 잃지 않게 해주는 여유',
+          },
         ],
+
         factions: [
-          { title: '구파일방 (정파 무림맹)', description: '강호의 정통성과 대의를 중시하는 중원 정파의 연합' },
-          { title: '사파 십팔채 (녹림/장강)', description: '규율에 얽매이지 않고 실리와 힘으로 움직이는 세력' },
-          { title: '천마신교 (마교)', description: '절대적인 힘과 약육강식을 숭상하는 외세 무림' },
-          { title: '강호 무소속 협객련', description: '문파의 이익 다툼에 휘둘리지 않는 자유로운 낭인들의 연대' }
-        ]
+          {
+            title:
+              '구파일방 (정파 무림맹)',
+            description:
+              '강호의 정통성과 대의를 중시하는 중원 정파의 연합',
+          },
+          {
+            title:
+              '사파 십팔채 (녹림/장강)',
+            description:
+              '규율에 얽매이지 않고 실리와 힘으로 움직이는 세력',
+          },
+          {
+            title:
+              '천마신교 (마교)',
+            description:
+              '절대적인 힘과 약육강식을 숭상하는 외세 무림',
+          },
+          {
+            title:
+              '강호 무소속 협객련',
+            description:
+              '문파의 이익 다툼에 휘둘리지 않는 자유로운 낭인들의 연대',
+          },
+        ],
       });
     }
-  });
+  }
+);
 
-  // Main Chat Narrative API with Dynamic Token Diet Algorithm, 5 Meta-Elements & Grounding
-  app.post('/api/chat', async (req, res) => {
-    const startTime = Date.now();
-    const requestId = `req_chat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const {
-      messages = [],
-      worldInfo,
-      character,
-      dcRecords = [],
-      currentTurn = 1,
-      playerInput,
-      promptType = 'action',
-      diceRoll,
-    } = req.body;
+// ============================================================
+// MAIN CHAT / AI GM
+// ============================================================
 
-    const isGroundingEnabled = false;
-    const bg = character?.metaElements?.background;
-    const flaw = character?.metaElements?.flaw;
-    const oath = character?.metaElements?.oath;
-    const anchor = character?.metaElements?.anchor;
-    const faction = character?.metaElements?.faction;
+app.post('/api/chat', async (req, res) => {
+  const startTime = Date.now();
 
-    const metaPresent = Boolean(bg?.title && flaw?.title && oath?.title && anchor?.title && faction?.title);
-    console.log(`[META_STATE] Turn ${currentTurn} | BG: ${bg?.title ? 'present' : 'missing'} | Flaw: ${flaw?.title ? 'present' : 'missing'} | Oath: ${oath?.title ? 'present' : 'missing'} | Anchor: ${anchor?.title ? 'present' : 'missing'} | Faction: ${faction?.title ? 'present' : 'missing'}`);
+  const requestId =
+    `req_chat_${Date.now()}_` +
+    Math.random()
+      .toString(36)
+      .substring(2, 6);
 
-    try {
-      const ai = getAIClient();
+  const {
+    messages = [],
+    worldInfo,
+    character,
+    dcRecords = [],
+    currentTurn = 1,
+    playerInput,
+    promptType = 'action',
+    diceRoll,
+  } = req.body;
 
-      // Dynamic Token Diet Algorithm (Section 1.7):
-      // - Keep the last 10 turns (20 messages: 10 player + 10 GM) 100% verbatim
-      // - For older messages, distill into [Previous Narrative Summary Packet]
-      const verbatimWindowSize = 20;
-      let olderSummaryPacket = '';
+  const isGroundingEnabled = false;
 
-      if (messages.length > verbatimWindowSize) {
-        const olderMessages = messages.slice(0, messages.length - verbatimWindowSize);
-        const olderSnippets = olderMessages
+  const bg =
+    character?.metaElements?.background;
+
+  const flaw =
+    character?.metaElements?.flaw;
+
+  const oath =
+    character?.metaElements?.oath;
+
+  const anchor =
+    character?.metaElements?.anchor;
+
+  const faction =
+    character?.metaElements?.faction;
+
+  const metaPresent =
+    Boolean(
+      bg?.title &&
+      flaw?.title &&
+      oath?.title &&
+      anchor?.title &&
+      faction?.title
+    );
+
+  console.log(
+    `[META_STATE] Turn ${currentTurn} | ` +
+    `BG: ${bg?.title ? 'present' : 'missing'} | ` +
+    `Flaw: ${flaw?.title ? 'present' : 'missing'} | ` +
+    `Oath: ${oath?.title ? 'present' : 'missing'} | ` +
+    `Anchor: ${anchor?.title ? 'present' : 'missing'} | ` +
+    `Faction: ${faction?.title ? 'present' : 'missing'}`
+  );
+
+  try {
+    const ai = getAIClient();
+
+    // --------------------------------------------------------
+    // Dynamic Token Diet
+    // --------------------------------------------------------
+
+    const verbatimWindowSize = 20;
+
+    let olderSummaryPacket = '';
+
+    if (
+      messages.length >
+      verbatimWindowSize
+    ) {
+      const olderMessages =
+        messages.slice(
+          0,
+          messages.length -
+            verbatimWindowSize
+        );
+
+      const olderSnippets =
+        olderMessages
           .slice(-10)
-          .map((m: any) => `[${m.sender === 'player' || m.role === 'user' ? '플레이어' : 'AI GM'}]: ${(m.content || '').slice(0, 150)}...`)
+          .map(
+            (m: any) =>
+              `[${m.sender === 'player' ||
+                m.role === 'user'
+                ? '플레이어'
+                : 'AI GM'}]: ${
+                (m.content || '')
+                  .slice(0, 150)
+              }...`
+          )
           .join('\n');
-        olderSummaryPacket = `[Previous Narrative Summary Packet - 이전 서사 누적 요약]
+
+      olderSummaryPacket =
+        `[Previous Narrative Summary Packet - 이전 서사 누적 요약]
 - 현재 턴: ${currentTurn}
 - 이전 진행 요약:
 ${olderSnippets}
-- 현재 주인공 위치: ${character?.location || worldInfo?.currentLocation || '강호'}
-- 현재 챕터: ${worldInfo?.chapters?.currentChapter || '제1장'}
-- 이전 누적 복선 씨앗: ${(worldInfo?.seeds || []).map((s: any) => s.title).join(', ') || '없음'}
-- 이전 카메라 밖 정세: ${(worldInfo?.offCameraEvents || []).slice(-2).join(' / ') || '특이사항 없음'}`;
+- 현재 주인공 위치: ${
+          character?.location ||
+          worldInfo?.currentLocation ||
+          '강호'
+        }
+- 현재 챕터: ${
+          worldInfo?.chapters
+            ?.currentChapter ||
+          '제1장'
+        }
+- 이전 누적 복선 씨앗: ${
+          (worldInfo?.seeds || [])
+            .map(
+              (s: any) =>
+                s.title
+            )
+            .join(', ') ||
+          '없음'
+        }
+- 이전 카메라 밖 정세: ${
+          (worldInfo?.offCameraEvents ||
+            [])
+            .slice(-2)
+            .join(' / ') ||
+          '특이사항 없음'
+        }`;
+    }
+
+    const recentMessages =
+      messages.slice(
+        -verbatimWindowSize
+      );
+
+    // --------------------------------------------------------
+    // Gemini Contents
+    // --------------------------------------------------------
+
+    const contents: Array<{
+      role: 'user' | 'model';
+      parts: Array<{
+        text: string;
+      }>;
+    }> = [];
+
+    const contextPacket =
+      `[현재 TRPG 세션 상태 및 인물 프로필]
+- 세계관/원작: ${
+        worldInfo?.worldName ||
+        '정통 무협'
+      } (${
+        worldInfo?.genre ||
+        'Wuxia'
+      })
+- 현재 위치: ${
+        character?.location ||
+        worldInfo?.currentLocation ||
+        '미상'
       }
-
-      const recentMessages = messages.slice(-verbatimWindowSize);
-
-      // Build structured contents payload
-      const contents: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
-
-      // Context introduction header: Injected with 5 Meta-Elements Causal Rules on EVERY turn
-      const contextPacket = `[현재 TRPG 세션 상태 및 인물 프로필]
-- 세계관/원작: ${worldInfo?.worldName || '정통 무협'} (${worldInfo?.genre || 'Wuxia'})
-- 현재 위치: ${character?.location || worldInfo?.currentLocation || '미상'}
-- 챕터: ${worldInfo?.chapters?.currentChapter || '제1장'}
-- 주인공 성명: ${character?.name} (${character?.title ? `별호: ${character.title}, ` : ''}${character?.age}세, ${character?.gender})
-- 외모 및 특징: ${character?.appearance || '검소한 옷차림'}
-- 능력치(스탯): ${JSON.stringify(character?.stats || {})}
-- [주인공 5대 메타 엘리먼트 및 영구 인과 닻 (PLAYER 5 META-ELEMENTS)]:
-  * 출신/배경 (Background) [${bg?.type || '기본'}]: ${bg?.title || '미상'} - ${bg?.description || '상세 없음'}
-    [인과 규칙]: NPC의 주인공 과거 인지 여부, 사회적 신분 대우, 출신 문파/가문과의 역사적 연계.
-  * 결핍/약점 (Flaw) [${flaw?.type || '기본'}]: ${flaw?.title || '미상'} - ${flaw?.description || '상세 없음'}
-    [인과 규칙]: 심리적 위기나 극한의 전투, 감정적 충동 시 취약성 및 선택의 불리함 유발.
-  * 맹세/신념 (Oath) [${oath?.type || '기본'}]: ${oath?.title || '미상'} - ${oath?.description || '상세 없음'}
-    [인과 규칙]: 도덕적 딜레마, 맹세 위반 시 발생하는 관계 파탄 및 내면적 갈등.
-  * 심리적 닻 (Anchor) [${anchor?.type || '기본'}]: ${anchor?.title || '미상'} - ${anchor?.description || '상세 없음'}
-    [인과 규칙]: 절망의 순간 정신적 버팀목, 회상 및 결정적 의지 발동의 매개체.
-  * 소속 세력 (Faction) [${faction?.type || '기본'}]: ${faction?.title || '미상'} - ${faction?.description || '상세 없음'}
-    [인과 규칙]: 타 세력과의 외교/적대 관계, 세력 정보망 접근권, 정치적 이해관계 파장.
-- 소장품(인벤토리): ${(character?.inventory || []).map((i: any) => `${i.name}(${i.quantity})`).join(', ') || '기본 의복 및 여비'}
-- 등록된 등장인물(NPC/OC): ${(worldInfo?.npcs || []).map((n: any) => `${n.name}(${n.classRating}, 관계: ${n.relationship})`).join(', ') || '없음'}
-- 활성화된 복선: ${(worldInfo?.seeds || []).map((s: any) => s.title).join(', ') || '없음'}
-- 지금까지 사용된 목표 DC 기록: ${dcRecords.length > 0 ? dcRecords.slice(-5).map((r: any) => `DC${r.targetDC}(${r.outcome})`).join(', ') : '없음'}`;
-
-      if (olderSummaryPacket) {
-        contents.push({
-          role: 'user',
-          parts: [{ text: `${contextPacket}\n\n${olderSummaryPacket}` }],
-        });
-        contents.push({
-          role: 'model',
-          parts: [{ text: '이전 서사의 인과와 맥락, 인물 심경 및 복선 상태를 완벽히 계승하여 서사를 이어나갑니다.' }],
-        });
-      } else {
-        contents.push({
-          role: 'user',
-          parts: [{ text: contextPacket }],
-        });
-        contents.push({
-          role: 'model',
-          parts: [{ text: '세계관 설정과 주인공의 5대 메타 엘리먼트 및 정체성을 완전히 파악했습니다. 격조 높은 정통 문학 서사를 전개합니다.' }],
-        });
+- 챕터: ${
+        worldInfo?.chapters
+          ?.currentChapter ||
+        '제1장'
       }
-
-      // Add recent messages verbatim
-      for (const msg of recentMessages) {
-        contents.push({
-          role: (msg.sender === 'player' || msg.role === 'user') ? 'user' : 'model',
-          parts: [{ text: msg.rawContent || msg.content || '' }],
-        });
+- 주인공 성명: ${
+        character?.name ||
+        '미상'
+      } (${
+        character?.title
+          ? `별호: ${character.title}, `
+          : ''
+      }${
+        character?.age ??
+        '미상'
+      }세, ${
+        character?.gender ||
+        '미상'
+      })
+- 외모 및 특징: ${
+        character?.appearance ||
+        '검소한 옷차림'
       }
-
-      // Append current turn user prompt if separate
-      let currentTurnPrompt = playerInput || '';
-      if (diceRoll) {
-        currentTurnPrompt = `[플레이어 주사위 투척 선언: D${diceRoll.sides} 굴림 = 순수 눈금 ${diceRoll.rawRoll}, 보정치 +${diceRoll.modifier}, 최종 합계 ${diceRoll.total}${diceRoll.targetDC ? `, 목표 DC: ${diceRoll.targetDC} -> 판정 결과: ${diceRoll.outcomeLabel}` : ''}]\n\n${playerInput || ''}`;
+- 능력치(스탯): ${
+        JSON.stringify(
+          character?.stats ||
+          {}
+        )
       }
-
-      if (currentTurnPrompt && (!recentMessages.length || (recentMessages[recentMessages.length - 1].content !== currentTurnPrompt))) {
-        contents.push({
-          role: 'user',
-          parts: [{ text: currentTurnPrompt }],
-        });
+- [주인공 5대 메타 엘리먼트 및 영구 인과 닻 (PLAYER 5 META-ELEMENTS)]
+  * 출신/배경 (Background) [${
+    bg?.type ||
+    '기본'
+  }]: ${
+    bg?.title ||
+    '미상'
+  } - ${
+    bg?.description ||
+    '상세 없음'
+  }
+  * 결핍/약점 (Flaw) [${
+    flaw?.type ||
+    '기본'
+  }]: ${
+    flaw?.title ||
+    '미상'
+  } - ${
+    flaw?.description ||
+    '상세 없음'
+  }
+  * 맹세/신념 (Oath) [${
+    oath?.type ||
+    '기본'
+  }]: ${
+    oath?.title ||
+    '미상'
+  } - ${
+    oath?.description ||
+    '상세 없음'
+  }
+  * 심리적 닻 (Anchor) [${
+    anchor?.type ||
+    '기본'
+  }]: ${
+    anchor?.title ||
+    '미상'
+  } - ${
+    anchor?.description ||
+    '상세 없음'
+  }
+  * 소속 세력 (Faction) [${
+    faction?.type ||
+    '기본'
+  }]: ${
+    faction?.title ||
+    '미상'
+  } - ${
+    faction?.description ||
+    '상세 없음'
+  }
+- 소장품(인벤토리): ${
+        (character?.inventory ||
+          [])
+          .map(
+            (i: any) =>
+              `${i.name}(${i.quantity})`
+          )
+          .join(', ') ||
+        '기본 의복 및 여비'
       }
+- 등록된 등장인물(NPC/OC): ${
+        (worldInfo?.npcs ||
+          [])
+          .map(
+            (n: any) =>
+              `${n.name}(${n.classRating}, 관계: ${n.relationship})`
+          )
+          .join(', ') ||
+        '없음'
+      }
+- 활성화된 복선: ${
+        (worldInfo?.seeds ||
+          [])
+          .map(
+            (s: any) =>
+              s.title
+          )
+          .join(', ') ||
+        '없음'
+      }
+- 지금까지 사용된 목표 DC 기록: ${
+        dcRecords.length > 0
+          ? dcRecords
+              .slice(-5)
+              .map(
+                (r: any) =>
+                  `DC${r.targetDC}(${r.outcome})`
+              )
+              .join(', ')
+          : '없음'
+      }`;
 
-      // Build config with strict thinkingBudget 4096 and conditional Google Search tools
-      const generateConfig: any = {
-        systemInstruction: MASTER_SYSTEM_INSTRUCTION,
-        temperature: 0.85,
-        thinkingConfig: {
-          thinkingBudget: 4096,
+    if (olderSummaryPacket) {
+      contents.push({
+        role: 'user',
+        parts: [
+          {
+            text:
+              `${contextPacket}\n\n${olderSummaryPacket}`,
+          },
+        ],
+      });
+
+      contents.push({
+        role: 'model',
+        parts: [
+          {
+            text:
+              '이전 서사의 인과와 맥락, 인물 심경 및 복선 상태를 계승하여 서사를 이어나갑니다.',
+          },
+        ],
+      });
+    } else {
+      contents.push({
+        role: 'user',
+        parts: [
+          {
+            text: contextPacket,
+          },
+        ],
+      });
+
+      contents.push({
+        role: 'model',
+        parts: [
+          {
+            text:
+              '세계관 설정과 주인공의 5대 메타 엘리먼트 및 정체성을 파악했습니다. 격조 높은 정통 문학 서사를 전개합니다.',
+          },
+        ],
+      });
+    }
+
+    // --------------------------------------------------------
+    // Recent Messages
+    // --------------------------------------------------------
+
+    for (
+      const msg of recentMessages
+    ) {
+      contents.push({
+        role:
+          msg.sender === 'player' ||
+          msg.role === 'user'
+            ? 'user'
+            : 'model',
+
+        parts: [
+          {
+            text:
+              msg.rawContent ||
+              msg.content ||
+              '',
+          },
+        ],
+      });
+    }
+
+    // --------------------------------------------------------
+    // Current Turn
+    // --------------------------------------------------------
+
+    let currentTurnPrompt =
+      playerInput || '';
+
+    if (diceRoll) {
+      currentTurnPrompt =
+        `[플레이어 주사위 투척 선언: ` +
+        `D${diceRoll.sides} 굴림 = ` +
+        `순수 눈금 ${diceRoll.rawRoll}, ` +
+        `보정치 +${diceRoll.modifier}, ` +
+        `최종 합계 ${diceRoll.total}` +
+        `${
+          diceRoll.targetDC
+            ? `, 목표 DC: ${diceRoll.targetDC} -> 판정 결과: ${diceRoll.outcomeLabel}`
+            : ''
+        }]\n\n${
+          playerInput || ''
+        }`;
+    }
+
+    if (
+      currentTurnPrompt &&
+      (
+        !recentMessages.length ||
+        recentMessages[
+          recentMessages.length - 1
+        ].content !==
+          currentTurnPrompt
+      )
+    ) {
+      contents.push({
+        role: 'user',
+        parts: [
+          {
+            text:
+              currentTurnPrompt,
+          },
+        ],
+      });
+    }
+
+    // --------------------------------------------------------
+    // Gemini Configuration
+    // --------------------------------------------------------
+
+    const generateConfig: any = {
+      systemInstruction:
+        MASTER_SYSTEM_INSTRUCTION,
+
+      temperature: 0.85,
+
+      thinkingConfig: {
+        thinkingBudget: 4096,
+      },
+    };
+
+    if (
+      isGroundingEnabled
+    ) {
+      generateConfig.tools = [
+        {
+          googleSearch: {},
         },
-      };
-
-      if (isGroundingEnabled) {
-        generateConfig.tools = [{ googleSearch: {} }];
-      }
-
-      // Call Gemini 3.7 Flash
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.7-flash',
-        contents: contents as any,
-        config: generateConfig,
-      });
-
-      const fullOutput = response.text || '';
-      const latencyMs = Date.now() - startTime;
-
-      callMetrics.push({
-        requestId,
-        endpoint: '/api/chat',
-        timestamp: startTime,
-        model: 'gemini-3.7-flash',
-        turnNumber: currentTurn,
-        metaElementsPresent: metaPresent,
-        worldInfoPresent: Boolean(worldInfo?.worldName),
-        groundingEnabled: isGroundingEnabled,
-        success: true,
-        latencyMs,
-      });
-
-      console.log(`[GEMINI_CALL] ${requestId} | Turn: ${currentTurn} | Latency: ${latencyMs}ms | Grounding: ${isGroundingEnabled} | Success: true`);
-
-      res.json({
-        rawResponse: fullOutput,
-        narrativeProse: fullOutput,
-        turnNumber: currentTurn,
-      });
-    } catch (err: any) {
-      const latencyMs = Date.now() - startTime;
-      callMetrics.push({
-        requestId,
-        endpoint: '/api/chat',
-        timestamp: startTime,
-        model: 'gemini-3.7-flash',
-        turnNumber: currentTurn,
-        metaElementsPresent: metaPresent,
-        worldInfoPresent: Boolean(worldInfo?.worldName),
-        groundingEnabled: isGroundingEnabled,
-        success: false,
-        latencyMs,
-        errorStatus: err?.status || 500,
-        errorMessage: err?.message || 'AI GM error',
-      });
-
-      console.error(`[GEMINI_ERROR] ${requestId} | Turn: ${currentTurn} | Status: ${err?.status || 500} | Msg: ${err?.message}`);
-      res.status(500).json({
-        error: err?.message || 'AI GM 서버 통신 중 오류가 발생했습니다.',
-      });
+      ];
     }
-  });
 
-  // Cloud Save API: Generates collision-resistant 6-digit sync code (e.g. X9K2A7)
-  app.post('/api/cloud-save', (req, res) => {
+    // --------------------------------------------------------
+    // Gemini Call
+    // --------------------------------------------------------
+
+    const response =
+      await ai.models.generateContent({
+        model:
+          'gemini-3.7-flash',
+
+        contents:
+          contents as any,
+
+        config:
+          generateConfig,
+      });
+
+    const fullOutput =
+      response.text || '';
+
+    const latencyMs =
+      Date.now() -
+      startTime;
+
+    callMetrics.push({
+      requestId,
+
+      endpoint:
+        '/api/chat',
+
+      timestamp:
+        startTime,
+
+      model:
+        'gemini-3.7-flash',
+
+      turnNumber:
+        currentTurn,
+
+      metaElementsPresent:
+        metaPresent,
+
+      worldInfoPresent:
+        Boolean(
+          worldInfo?.worldName
+        ),
+
+      groundingEnabled:
+        isGroundingEnabled,
+
+      success:
+        true,
+
+      latencyMs,
+    });
+
+    console.log(
+      `[GEMINI_CALL] ${requestId} | ` +
+      `Turn: ${currentTurn} | ` +
+      `Latency: ${latencyMs}ms | ` +
+      `Grounding: ${isGroundingEnabled} | ` +
+      `Success: true`
+    );
+
+    return res.status(200).json({
+      success: true,
+
+      rawResponse:
+        fullOutput,
+
+      narrativeProse:
+        fullOutput,
+
+      reply:
+        fullOutput,
+
+      turnNumber:
+        currentTurn,
+    });
+  } catch (err: any) {
+    const latencyMs =
+      Date.now() -
+      startTime;
+
+    callMetrics.push({
+      requestId,
+
+      endpoint:
+        '/api/chat',
+
+      timestamp:
+        startTime,
+
+      model:
+        'gemini-3.7-flash',
+
+      turnNumber:
+        currentTurn,
+
+      metaElementsPresent:
+        metaPresent,
+
+      worldInfoPresent:
+        Boolean(
+          worldInfo?.worldName
+        ),
+
+      groundingEnabled:
+        isGroundingEnabled,
+
+      success:
+        false,
+
+      latencyMs,
+
+      errorStatus:
+        err?.status ||
+        500,
+
+      errorMessage:
+        err?.message ||
+        'AI GM error',
+    });
+
+    console.error(
+      `[GEMINI_ERROR] ${requestId} | ` +
+      `Turn: ${currentTurn} | ` +
+      `Status: ${err?.status || 500} | ` +
+      `Msg: ${err?.message}`
+    );
+
+    return res.status(500).json({
+      success: false,
+
+      error:
+        err?.message ||
+        'AI GM 서버 통신 중 오류가 발생했습니다.',
+    });
+  }
+});
+
+// ============================================================
+// CLOUD SAVE
+// ============================================================
+
+app.post(
+  '/api/cloud-save',
+  (req, res) => {
     try {
-      const { sessionData } = req.body;
+      const {
+        sessionData,
+      } = req.body;
+
       if (!sessionData) {
-        return res.status(400).json({ error: 'Session data is required' });
+        return res.status(400).json({
+          error:
+            'Session data is required',
+        });
       }
 
-      // Generate 6-digit collision-resistant code
-      const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+      const chars =
+        '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+
       let syncCode = '';
-      for (let i = 0; i < 6; i++) {
-        syncCode += chars.charAt(Math.floor(Math.random() * chars.length));
+
+      for (
+        let i = 0;
+        i < 6;
+        i++
+      ) {
+        syncCode +=
+          chars.charAt(
+            Math.floor(
+              Math.random() *
+                chars.length
+            )
+          );
       }
 
-      cloudStorage.set(syncCode.toUpperCase(), {
-        syncCode: syncCode.toUpperCase(),
-        data: sessionData,
-        createdAt: Date.now(),
-      });
+      syncCode =
+        syncCode.toUpperCase();
 
-      res.json({
-        success: true,
-        syncCode: syncCode.toUpperCase(),
-        savedAt: Date.now(),
+      cloudStorage.set(
+        syncCode,
+        {
+          syncCode,
+          data:
+            sessionData,
+          createdAt:
+            Date.now(),
+        }
+      );
+
+      return res.status(200).json({
+        success:
+          true,
+
+        syncCode,
+
+        savedAt:
+          Date.now(),
       });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'Failed to save to cloud' });
+      return res.status(500).json({
+        error:
+          err?.message ||
+          'Failed to save to cloud',
+      });
     }
-  });
+  }
+);
 
-  // Cloud Load API: Loads session via 6-digit code
-  app.get('/api/cloud-load/:code', (req, res) => {
+// ============================================================
+// CLOUD LOAD
+// ============================================================
+
+app.get(
+  '/api/cloud-load/:code',
+  (req, res) => {
     try {
-      const code = (req.params.code || '').trim().toUpperCase();
-      const entry = cloudStorage.get(code);
+      const code =
+        (
+          req.params.code ||
+          ''
+        )
+          .trim()
+          .toUpperCase();
+
+      const entry =
+        cloudStorage.get(
+          code
+        );
 
       if (!entry) {
         return res.status(404).json({
-          error: `동기화 코드 [${code}]에 해당하는 세션을 찾을 수 없습니다. 코드를 다시 확인해 주세요.`,
+          error:
+            `동기화 코드 [${code}]에 해당하는 세션을 찾을 수 없습니다. 코드를 다시 확인해 주세요.`,
         });
       }
 
-      res.json({
-        success: true,
-        syncCode: entry.syncCode,
-        data: entry.data,
-        createdAt: entry.createdAt,
+      return res.status(200).json({
+        success:
+          true,
+
+        syncCode:
+          entry.syncCode,
+
+        data:
+          entry.data,
+
+        createdAt:
+          entry.createdAt,
       });
     } catch (err: any) {
-      res.status(500).json({ error: err?.message || 'Failed to load from cloud' });
+      return res.status(500).json({
+        error:
+          err?.message ||
+          'Failed to load from cloud',
+      });
     }
-  });
+  }
+);
 
-  // Vite middleware in dev / Static dist in production
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+// ============================================================
+// 404 API HANDLER
+// ============================================================
+
+app.use(
+  '/api',
+  (req, res) => {
+    res.status(404).json({
+      success: false,
+      error:
+        'API endpoint not found',
+      path: req.path,
+      method: req.method,
     });
   }
+);
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`TRPG Engine & Web Player server running on http://0.0.0.0:${PORT}`);
-  });
+// ============================================================
+// LOCAL VITE / PRODUCTION STATIC SERVER
+// ============================================================
+
+async function startServer() {
+  // ----------------------------------------------------------
+  // VERCEL
+  // ----------------------------------------------------------
+
+  if (process.env.VERCEL) {
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // LOCAL DEVELOPMENT
+  // ----------------------------------------------------------
+
+  if (
+    process.env.NODE_ENV !==
+    'production'
+  ) {
+    const {
+      createServer:
+        createViteServer,
+    } = await import('vite');
+
+    const vite =
+      await createViteServer({
+        server: {
+          middlewareMode:
+            true,
+        },
+
+        appType:
+          'spa',
+      });
+
+    app.use(
+      vite.middlewares
+    );
+  }
+
+  // ----------------------------------------------------------
+  // LOCAL PRODUCTION
+  // ----------------------------------------------------------
+
+  else {
+    const distPath =
+      path.join(
+        process.cwd(),
+        'dist'
+      );
+
+    app.use(
+      express.static(
+        distPath
+      )
+    );
+
+    app.get(
+      '*',
+      (req, res) => {
+        res.sendFile(
+          path.join(
+            distPath,
+            'index.html'
+          )
+        );
+      }
+    );
+  }
+
+  // ----------------------------------------------------------
+  // LOCAL LISTEN
+  // ----------------------------------------------------------
+
+  app.listen(
+    Number(
+      process.env.PORT || 3000
+    ),
+    '0.0.0.0',
+    () => {
+      console.log(
+        `TRPG Engine & Web Player server running on http://0.0.0.0:${Number(
+          process.env.PORT || 3000
+        )}`
+      );
+    }
+  );
 }
 
+// ============================================================
+// VERCEL ENTRYPOINT
+// ============================================================
+
 export default app;
+
+// ============================================================
+// LOCAL ENTRYPOINT
+// ============================================================
+
 if (!process.env.VERCEL) {
-  startServer();
+  startServer().catch(
+    (error) => {
+      console.error(
+        'Failed to start local server:',
+        error
+      );
+
+      process.exit(1);
+    }
+  );
 }
