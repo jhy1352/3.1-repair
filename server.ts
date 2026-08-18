@@ -155,9 +155,9 @@ C. 불필요한 인트로를 생략하고 이전 세션의 마지막 시간대�
 
 [[[[개 혐스러운 웹소설식 진행과 서술 원천 금지한다. 서술 생성 중 웹소설식 표현과 상황, 주인공이 초능력자인 양 모든 것을 다 알고 간파하는 혐오스럽고 병신같은 상황 연출이 진행되면 오류메시지를 뿜고 다시 개연성을 최우선하여 리테콘해라]]]]`;
 
-async function startServer() {
   const app = express();
   const PORT = 3000;
+async function startServer() {
 
   app.use(express.json({ limit: '10mb' }));
 
