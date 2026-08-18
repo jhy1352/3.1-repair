@@ -312,7 +312,7 @@ async function startServer() {
       diceRoll,
     } = req.body;
 
-    const isGroundingEnabled = process.env.ENABLE_WEB_GROUNDING !== 'false';
+    const isGroundingEnabled = false;
     const bg = character?.metaElements?.background;
     const flaw = character?.metaElements?.flaw;
     const oath = character?.metaElements?.oath;
